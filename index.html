@@ -28,7 +28,12 @@
     th,td{border-bottom:1px solid #334155;padding:9px;text-align:left;vertical-align:top}
     th{color:#fbbf24;background:#020617;position:sticky;top:0}
     .tablewrap{overflow:auto;max-height:520px}
+    .uploadBox{border:1px dashed #64748b;border-radius:14px;padding:16px;background:#020617}
+    .status{margin-top:10px;padding:10px;border-radius:10px;background:#1e293b;color:#cbd5e1;font-size:13px;white-space:pre-wrap}
+    .warn{color:#facc15}
+    .good{color:#22c55e}
   </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
 <header>
@@ -78,6 +83,16 @@
     <br>
     <button onclick="filterBanks()">Find Suitable Banks</button>
     <button class="secondary" onclick="resetFilters()">Reset</button>
+  </section>
+
+
+  <section class="panel">
+    <h2>Document Auto Detection</h2>
+    <div class="uploadBox">
+      <label>Upload Payslip / Income Document</label>
+      <input id="docUpload" type="file" accept=".pdf,.txt,.csv" onchange="handleDocumentUpload(event)">
+      <div id="docStatus" class="status">Upload a text-based PDF payslip first. This version can detect nett income from selectable-text PDFs. Scanned/image payslips need OCR upgrade later.</div>
+    </div>
   </section>
 
   <section class="panel">
@@ -226,6 +241,112 @@ function resetFilters(){
   document.getElementById("salary").value = "";
   document.getElementById("search").value = "";
   filterBanks();
+}
+
+
+async function handleDocumentUpload(event){
+  const file = event.target.files[0];
+  const status = document.getElementById("docStatus");
+  if(!file){ return; }
+
+  status.innerHTML = "Reading document...";
+
+  try{
+    let text = "";
+
+    if(file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")){
+      text = await extractTextFromPDF(file);
+    } else {
+      text = await file.text();
+    }
+
+    const detectedType = detectDocumentType(text);
+    const nettIncome = extractNettIncome(text);
+
+    let output = `Detected Document Type: ${detectedType}\n`;
+
+    if(nettIncome){
+      document.getElementById("salary").value = nettIncome;
+      output += `Detected Nett Income: RM ${nettIncome.toLocaleString()}\n`;
+      output += "Status: Auto-filled Minimum Salary field. Please double check before using.";
+      status.innerHTML = `<span class="good">${output}</span>`;
+      filterBanks();
+    } else {
+      output += "Detected Nett Income: Not found\n";
+      output += "Status: Try a clearer text-based payslip, or add OCR upgrade for scanned/photo payslips.";
+      status.innerHTML = `<span class="warn">${output}</span>`;
+    }
+  } catch(error){
+    status.innerHTML = `<span class="warn">Cannot read this file yet. This may be a scanned PDF/image payslip. OCR upgrade is needed.\n\nError: ${error.message}</span>`;
+  }
+}
+
+async function extractTextFromPDF(file){
+  if(!window.pdfjsLib){
+    throw new Error("PDF reader library not loaded.");
+  }
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  let fullText = "";
+
+  for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const pageText = content.items.map(item => item.str).join(" ");
+    fullText += "\n" + pageText;
+  }
+
+  return fullText;
+}
+
+function detectDocumentType(text){
+  const t = text.toLowerCase();
+
+  if(t.includes("payslip") || t.includes("pay slip") || t.includes("salary slip") || t.includes("gaji") || t.includes("nett pay") || t.includes("net pay")){
+    return "Payslip";
+  }
+
+  if(t.includes("kwsp") || t.includes("epf")){
+    return "EPF / KWSP";
+  }
+
+  if(t.includes("bank statement") || t.includes("account statement") || t.includes("penyata akaun")){
+    return "Bank Statement";
+  }
+
+  if(t.includes("ea form") || t.includes("borang ea")){
+    return "EA Form";
+  }
+
+  return "Unknown Document";
+}
+
+function extractNettIncome(text){
+  const clean = text
+    .replace(/,/g, "")
+    .replace(/RM\s*/gi, "RM ")
+    .replace(/\s+/g, " ");
+
+  const patterns = [
+    /(?:nett pay|net pay|net salary|nett salary|nett income|net income|gaji bersih|jumlah bersih|bayaran bersih)\s*[:\-]?\s*(?:RM)?\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /(?:take home pay|amount paid|salary credited)\s*[:\-]?\s*(?:RM)?\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /(?:total net)\s*[:\-]?\s*(?:RM)?\s*([0-9]+(?:\.[0-9]{2})?)/i
+  ];
+
+  for(const pattern of patterns){
+    const match = clean.match(pattern);
+    if(match && match[1]){
+      const value = Number(match[1]);
+      if(value > 300 && value < 100000){
+        return Math.round(value);
+      }
+    }
+  }
+
+  return null;
 }
 
 renderTable();
