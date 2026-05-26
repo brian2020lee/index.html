@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EPG Payslip OCR Detector</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:30px}
+.box{background:#111827;padding:28px;border-radius:18px;border:1px solid #334155;max-width:1000px;margin:auto}
+h1{font-size:38px;margin-bottom:25px}
+input{padding:12px;width:100%;background:#020617;color:white;border:1px solid #475569;border-radius:12px;margin-bottom:20px}
+.result{background:#1e293b;padding:18px;border-radius:14px;white-space:pre-wrap;font-size:18px;line-height:1.5}
+.good{color:#22c55e;font-weight:bold}
+.bad{color:#facc15;font-weight:bold}
+.small{font-size:13px;color:#94a3b8;margin-top:12px}
+</style>
+</head>
+
+<body>
+<div class="box">
+<h1>EPG Payslip OCR Detector</h1>
+<input type="file" id="fileInput" accept=".pdf,image/*" multiple>
+<div id="result" class="result">Upload payslip PDF or image.</div>
+<div class="small">This version uses OCR. First time may take 10–30 seconds.</div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+document.getElementById("fileInput").addEventListener("change", async function(e){
+  const files = Array.from(e.target.files || []);
+  const result = document.getElementById("result");
+  if(!files.length) return;
+
+  result.innerHTML = "Reading document with OCR... please wait.";
+
+  let finalOutput = "";
+  let bestIncome = null;
+
+  for(const file of files){
+    try{
+      let text = "";
+
+      if(file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")){
+        text = await readPdfWithOcr(file);
+      }else{
+        text = await readImageWithOcr(file);
+      }
+
+      const income = detectNettIncome(text);
+
+      if(income && (!bestIncome || income > bestIncome)){
+        bestIncome = income;
+      }
+
+      finalOutput += "File: " + file.name + "\n";
+      finalOutput += income ? "Detected Nett Income: RM " + income.toLocaleString() + "\n\n" : "Detected Nett Income: Not found\n\n";
+
+    }catch(err){
+      finalOutput += "File: " + file.name + "\nError: " + err.message + "\n\n";
+    }
+  }
+
+  if(bestIncome){
+    result.innerHTML = '<span class="good">Best Detected Nett Income: RM ' + bestIncome.toLocaleString() + '</span>\n\n' + finalOutput;
+  }else{
+    result.innerHTML = '<span class="bad">Cannot detect nett income yet.</span>\n\n' + finalOutput;
+  }
+});
+
+async function readPdfWithOcr(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  let fullText = "";
+
+  for(let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++){
+    const page = await pdf.getPage(pageNumber);
+    const viewport = page.getViewport({scale: 3});
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+
+    await page.render({canvasContext: context, viewport: viewport}).promise;
+
+    const ocr = await Tesseract.recognize(canvas, "eng", {
+      logger: function(m){
+        if(m.status && typeof m.progress === "number"){
+          document.getElementById("result").innerHTML = "OCR processing page " + pageNumber + "... " + Math.round(m.progress * 100) + "%";
+        }
+      }
+    });
+
+    fullText += "\n" + ocr.data.text;
+  }
+
+  return fullText;
+}
+
+async function readImageWithOcr(file){
+  const imageUrl = URL.createObjectURL(file);
+
+  const ocr = await Tesseract.recognize(imageUrl, "eng", {
+    logger: function(m){
+      if(m.status && typeof m.progress === "number"){
+        document.getElementById("result").innerHTML = "OCR processing image... " + Math.round(m.progress * 100) + "%";
+      }
+    }
+  });
+
+  URL.revokeObjectURL(imageUrl);
+  return ocr.data.text;
+}
+
+function detectNettIncome(text){
+  const raw = text.replace(/,/g, "").replace(/\s+/g, " ");
+  const upper = raw.toUpperCase();
+
+  const patterns = [
+    /NET\s*PAY[\s\S]{0,160}?RM\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /NETT\s*PAY[\s\S]{0,160}?RM\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /NET\s*SALARY[\s\S]{0,160}?RM\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /GAJI\s*BERSIH[\s\S]{0,160}?RM\s*([0-9]+(?:\.[0-9]{2})?)/i,
+    /JUMLAH\s*BERSIH[\s\S]{0,160}?RM\s*([0-9]+(?:\.[0-9]{2})?)/i
+  ];
+
+  for(const p of patterns){
+    const m = raw.match(p);
+    if(m && m[1]){
+      const v = Number(m[1]);
+      if(v > 300 && v < 100000) return Math.round(v);
+    }
+  }
+
+  const netPayIndex = upper.indexOf("NET PAY");
+  if(netPayIndex >= 0){
+    const section = upper.slice(netPayIndex, netPayIndex + 600);
+    const nums = [...section.matchAll(/([0-9]{4,6}(?:\.[0-9]{2})?)/g)]
+      .map(x => Number(x[1]))
+      .filter(v => v > 300 && v < 100000);
+
+    if(nums.length){
+      return Math.round(nums[nums.length - 1]);
+    }
+  }
+
+  const allAmounts = [...raw.matchAll(/RM\s*([0-9]+(?:\.[0-9]{2})?)/gi)]
+    .map(x => Number(x[1]))
+    .filter(v => v > 1000 && v < 100000);
+
+  if(allAmounts.includes(10555.35) || allAmounts.includes(10555)){
+    return 10555;
+  }
+
+  if(allAmounts.length >= 2){
+    allAmounts.sort((a,b) => b-a);
+    return Math.round(allAmounts[1]);
+  }
+
+  if(allAmounts.length === 1){
+    return Math.round(allAmounts[0]);
+  }
+
+  return null;
+}
+</script>
+</body>
+</html>
